@@ -34,6 +34,9 @@ describe('an unknown chat resolves to 404 (or an empty history), not a 500', () 
   it('getMessageReactions throws MessageNotFoundError', async () => {
     await expect(makeMessaging().getMessageReactions(CHAT, MESSAGE_ID)).rejects.toBeInstanceOf(MessageNotFoundError);
   });
+  it('getMessageReceipts throws MessageNotFoundError', async () => {
+    await expect(makeMessaging().getMessageReceipts(CHAT, MESSAGE_ID)).rejects.toBeInstanceOf(MessageNotFoundError);
+  });
   it('deleteMessage throws MessageNotFoundError', async () => {
     await expect(makeMessaging().deleteMessage(CHAT, MESSAGE_ID)).rejects.toBeInstanceOf(MessageNotFoundError);
   });
