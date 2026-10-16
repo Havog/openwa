@@ -117,4 +117,3 @@ describe('an unknown chat resolves to 404 (or an empty history), not a 500', () 
     });
   });
 });
-
