@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import { Readable } from 'stream';
 import { isPathWithin } from '../utils/path-safety';
 
 /** Max number of local files a single traversal enumerates. Bounds a count DoS on a huge media dir. */
@@ -30,7 +31,7 @@ export async function listLocalFiles(localPath: string): Promise<string[]> {
 /**
  * Full local enumeration as a stream — no count cap. Async + iterative (a work queue, not
  * recursion) so a deep/wide media tree can't block the event loop or stack-overflow; still
- * bounded by the max directory depth so a pathological tree can't descend unbounded.
+ * bounded by the max directory depth. An incomplete traversal fails instead of hiding files.
  */
 export async function* iterateLocalFiles(localPath: string, prefix = ''): AsyncGenerator<string> {
   // Iterative BFS: a queue of [relativeDir, depth] avoids unbounded call-stack growth. A prefix
@@ -41,14 +42,17 @@ export async function* iterateLocalFiles(localPath: string, prefix = ''): AsyncG
 
   while (queue.length > 0) {
     const { dir, depth } = queue.shift()!;
-    if (depth >= LOCAL_TRAVERSAL_MAX_DEPTH) continue;
+    if (depth >= LOCAL_TRAVERSAL_MAX_DEPTH) {
+      throw new Error(`Storage directory exceeds the maximum traversal depth: ${dir}`);
+    }
 
     const fullPath = path.join(localPath, dir);
     let entries: fs.Dirent[];
     try {
       entries = await fs.promises.readdir(fullPath, { withFileTypes: true });
-    } catch {
-      continue; // dir vanished or unreadable — skip rather than abort the whole traversal
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      continue; // A directory removed during enumeration has no files left to export.
     }
 
     for (const entry of entries) {
@@ -67,9 +71,27 @@ export function getLocalFile(localPath: string, filePath: string): Promise<Buffe
     throw new Error(`Refusing to read outside storage root: ${filePath}`);
   }
   const fullPath = path.join(localPath, filePath);
-  // Async read so the export loop (the only caller) yields the event loop per file instead of
-  // blocking it with a synchronous read for every media file.
+  // Async read so a media read yields the event loop instead of blocking it for the whole file.
   return fs.promises.readFile(fullPath);
+}
+
+/**
+ * Open a local file for a streamed read. The handle is opened and stat'ed up front, so a missing or
+ * unreadable file rejects here, before the caller commits to it, and the size is the one the open
+ * handle sees. The stream closes the handle when it ends or is destroyed.
+ */
+export async function openLocalFile(localPath: string, filePath: string): Promise<{ stream: Readable; size: number }> {
+  if (!isPathWithin(localPath, filePath)) {
+    throw new Error(`Refusing to read outside storage root: ${filePath}`);
+  }
+  const handle = await fs.promises.open(path.join(localPath, filePath), 'r');
+  try {
+    const { size } = await handle.stat();
+    return { stream: handle.createReadStream(), size };
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
 }
 
 export async function putLocalFile(localPath: string, filePath: string, data: Buffer): Promise<void> {

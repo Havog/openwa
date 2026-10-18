@@ -9,7 +9,9 @@ import com.rmyndharis.openwa.model.ChatPresence;
 import com.rmyndharis.openwa.model.ChatSummary;
 import com.rmyndharis.openwa.model.DeleteChatRequest;
 import com.rmyndharis.openwa.model.ListChatsQuery;
+import com.rmyndharis.openwa.model.MarkChatReadRequest;
 import com.rmyndharis.openwa.model.MarkChatRequest;
+import com.rmyndharis.openwa.model.SubscribePresenceRequest;
 import com.rmyndharis.openwa.model.MuteChatRequest;
 import com.rmyndharis.openwa.model.PinChatRequest;
 import com.rmyndharis.openwa.model.SendChatStateRequest;
@@ -49,7 +51,7 @@ public final class ChatsResource {
      * reconnect, so re-issue it when the session comes back. Subscribe per chat: WhatsApp emits an
      * update on every transition. whatsapp-web.js answers {@code 501}.
      */
-    public SuccessResult subscribePresence(String sessionId, MarkChatRequest body) {
+    public SuccessResult subscribePresence(String sessionId, SubscribePresenceRequest body) {
         return client.request(
             HttpMethod.POST,
             "/api/sessions/" + encodeSegment(sessionId) + "/presence/subscribe",
@@ -72,7 +74,7 @@ public final class ChatsResource {
     }
 
     /** Mark a chat as read/seen. */
-    public SuccessResult markRead(String sessionId, MarkChatRequest body) {
+    public SuccessResult markRead(String sessionId, MarkChatReadRequest body) {
         return client.request(
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/read", null, body, SuccessResult.class);
     }
@@ -83,7 +85,11 @@ public final class ChatsResource {
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/unread", null, body, SuccessResult.class);
     }
 
-    /** Delete every message in a chat, keeping the chat itself. */
+    /**
+     * Delete every message in a chat, keeping the chat itself. On success the gateway also deletes
+     * its stored copy of the chat's messages (rows, inline and archived media, search entries);
+     * export the history first if you need it.
+     */
     public SuccessResult clearMessages(String sessionId, String chatId) {
         return client.request(
             HttpMethod.DELETE,
@@ -123,7 +129,11 @@ public final class ChatsResource {
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/mute", null, body, SuccessResult.class);
     }
 
-    /** Delete a chat from the chat list. */
+    /**
+     * Delete a chat from the chat list. On success the gateway also deletes its stored copy of the
+     * chat's messages (rows, inline and archived media, search entries); export the history first if
+     * you need it.
+     */
     public SuccessResult delete(String sessionId, DeleteChatRequest body) {
         return client.request(
             HttpMethod.POST, "/api/sessions/" + encodeSegment(sessionId) + "/chats/delete", null, body, SuccessResult.class);

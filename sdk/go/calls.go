@@ -6,11 +6,19 @@ import "context"
 // Backed by src/modules/call/call.controller.ts.
 type CallsService struct{ client *Client }
 
+// CallLinkType is the kind of call a link opens.
+type CallLinkType string
+
+const (
+	CallLinkAudio CallLinkType = "audio"
+	CallLinkVideo CallLinkType = "video"
+)
+
 // CreateCallLinkRequest is the body for CallsService.CreateLink. Type is "audio" or "video";
 // WhatsApp's own URL path for audio is /voice/. StartTime is absolute epoch MILLISECONDS.
 type CreateCallLinkRequest struct {
-	Type      string  `json:"type"`
-	StartTime float64 `json:"startTime"`
+	Type      CallLinkType `json:"type"`
+	StartTime float64      `json:"startTime"`
 }
 
 // CallLinkResponse carries the shareable WhatsApp call link.
@@ -24,8 +32,8 @@ func (s *CallsService) base(sessionID string) string {
 
 // RejectCall rejects a ringing incoming call; callID comes from the
 // call.received event (CallReceivedPayload.CallID). A call can only be
-// rejected while it is still ringing — otherwise the server responds 404.
-// Requires an OPERATOR-level key.
+// rejected while it is still ringing; otherwise the server responds 404.
+// Baileys only; whatsapp-web.js answers 501. Requires an OPERATOR-level key.
 func (s *CallsService) RejectCall(ctx context.Context, sessionID, callID string) (*SuccessResult, error) {
 	var out SuccessResult
 	err := s.client.do(ctx, "POST", s.base(sessionID)+"/"+pathEscape(callID)+"/reject", nil, nil, &out)

@@ -3,6 +3,7 @@ package openwa
 import (
 	"encoding/json"
 	"net/url"
+	"strconv"
 )
 
 // MessageResponse is the acknowledgement for a sent message.
@@ -99,6 +100,11 @@ type SendTemplateRequest struct {
 	TemplateID   string            `json:"templateId,omitempty"`
 	TemplateName string            `json:"templateName,omitempty"`
 	Vars         map[string]string `json:"vars,omitempty"`
+	// Mentions lists WIDs to @mention in the rendered body, which must carry the @<number> token.
+	Mentions []string `json:"mentions,omitempty"`
+	// LinkPreview controls the URL preview on the rendered body, with the same engine split as
+	// SendTextRequest. A pointer so an explicit false is distinguishable from "not set".
+	LinkPreview *bool `json:"linkPreview,omitempty"`
 }
 
 // SendPollRequest sends a native WhatsApp poll. Options holds the choices to
@@ -121,6 +127,16 @@ type ReplyMessageRequest struct {
 	ChatID          string `json:"chatId"`
 	QuotedMessageID string `json:"quotedMessageId"`
 	Text            string `json:"text"`
+	// Mentions lists WIDs to @mention. The text must also contain the @<number> token.
+	Mentions []string `json:"mentions,omitempty"`
+}
+
+// ClickButtonRequest taps a choice on a WhatsApp Business prompt. Baileys only.
+type ClickButtonRequest struct {
+	ChatID    string `json:"chatId"`
+	MessageID string `json:"messageId"`
+	ButtonID  string `json:"buttonId"`
+	Text      string `json:"text,omitempty"`
 }
 
 // ForwardMessageRequest forwards a message between chats.
@@ -151,22 +167,50 @@ type EditMessageRequest struct {
 	ChatID    string `json:"chatId"`
 	MessageID string `json:"messageId"`
 	Body      string `json:"body"`
+	// Mentions re-applies participant tags: an edit REPLACES the body rather than amending it, so
+	// tags the original carried are lost unless resent.
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 // ListMessagesQuery filters GET /sessions/:id/messages.
 type ListMessagesQuery struct {
-	ChatID *string
-	From   *string
-	Limit  *int
-	Offset *int
+	// Inclusive lower/exclusive upper message-time bounds, Unix epoch milliseconds.
+	Since     *float64
+	Until     *float64
+	Direction *string
+	MessageID *string
+	OrderBy   *string
+	Type      *string
+	ChatID    *string
+	From      *string
+	Limit     *int
+	Offset    *int
+	// After is a keyset cursor: the id of the last message of the previous page. Takes
+	// precedence over Offset.
+	After *string
+	// InlineMedia set to false omits inline media payloads. The budget is per response, so a
+	// walk repays it on every page.
+	InlineMedia *bool
 }
 
 func (q *ListMessagesQuery) values() url.Values {
 	v := url.Values{}
+	if q.Since != nil {
+		v.Set("since", strconv.FormatFloat(*q.Since, 'f', -1, 64))
+	}
+	if q.Until != nil {
+		v.Set("until", strconv.FormatFloat(*q.Until, 'f', -1, 64))
+	}
+	setStr(v, "direction", q.Direction)
+	setStr(v, "orderBy", q.OrderBy)
+	setStr(v, "messageId", q.MessageID)
+	setStr(v, "type", q.Type)
 	setStr(v, "chatId", q.ChatID)
 	setStr(v, "from", q.From)
 	setInt(v, "limit", q.Limit)
 	setInt(v, "offset", q.Offset)
+	setStr(v, "after", q.After)
+	setBool(v, "inlineMedia", q.InlineMedia)
 	return v
 }
 
@@ -219,8 +263,9 @@ type MessageRecord struct {
 
 // MessageListResponse is the paginated message list payload.
 type MessageListResponse struct {
-	Messages []MessageRecord `json:"messages"`
-	Total    int             `json:"total"`
+	UnknownTimestampTotal *int            `json:"unknownTimestampTotal,omitempty"`
+	Messages              []MessageRecord `json:"messages"`
+	Total                 int             `json:"total"`
 }
 
 // ChatHistoryMedia is the media block on a live history message.
@@ -275,6 +320,32 @@ type ChatHistoryMessage struct {
 	Media         *ChatHistoryMedia `json:"media,omitempty"`
 	QuotedMessage *QuotedMessage    `json:"quotedMessage,omitempty"`
 	Location      *MessageLocation  `json:"location,omitempty"`
+	Order         *MessageOrder     `json:"order,omitempty"`
+	Product       *MessageProduct   `json:"product,omitempty"`
+	Poll          *ChatHistoryPoll  `json:"poll,omitempty"`
+}
+
+// ChatHistoryPoll contains the poll question, choices, and selection mode.
+type ChatHistoryPoll struct {
+	Name                 string   `json:"name"`
+	Options              []string `json:"options"`
+	AllowMultipleAnswers bool     `json:"allowMultipleAnswers"`
+}
+
+// MessageOrder is the order block on a live history message, present on order messages only: the
+// cart the customer placed from the business catalog, plus the single-order token for its items.
+type MessageOrder struct {
+	OrderID string `json:"orderId"`
+	Token   string `json:"token,omitempty"`
+}
+
+// MessageProduct is the product block on a live history message, present on product messages only:
+// the catalog product shared into the chat.
+type MessageProduct struct {
+	ProductID        string `json:"productId"`
+	Title            string `json:"title,omitempty"`
+	Description      string `json:"description,omitempty"`
+	BusinessOwnerJID string `json:"businessOwnerJid,omitempty"`
 }
 
 // MessageCall is the call block on a live history message, present on call messages only.
@@ -283,8 +354,9 @@ type MessageCall struct {
 	Missed bool `json:"missed"`
 }
 
-// MessageContact is the sender contact block on a live history message. History carries PushName
-// only; the richer fields arrive on message.received when WEBHOOK_CONTACT_DETAILS is enabled.
+// MessageContact is the sender contact block on a live history message. History carries Name and
+// PushName; the richer fields are added when WEBHOOK_CONTACT_DETAILS is enabled, as on
+// message.received.
 type MessageContact struct {
 	ID           string `json:"id,omitempty"`
 	Number       string `json:"number,omitempty"`
@@ -340,6 +412,9 @@ type BulkMessageContent struct {
 	Audio    *BulkMediaContent `json:"audio,omitempty"`
 	Document *BulkMediaContent `json:"document,omitempty"`
 	Caption  string            `json:"caption,omitempty"`
+	// Mentions is per item: a batch fans out to many chats, and a WID is only taggable in a chat
+	// the participant is in.
+	Mentions []string `json:"mentions,omitempty"`
 }
 
 // BulkMessageItem is one message in a bulk send. Type is one of: text, image,
@@ -417,6 +492,8 @@ const (
 	MsgPoll     MessageType = "poll"
 	MsgCall     MessageType = "call"
 	MsgRevoked  MessageType = "revoked"
+	MsgOrder    MessageType = "order"
+	MsgProduct  MessageType = "product"
 	MsgMasked   MessageType = "masked"
 	MsgUnknown  MessageType = "unknown"
 )
@@ -470,7 +547,7 @@ type BatchProgress struct {
 	Cancelled int `json:"cancelled"`
 }
 
-// BatchStatusResponse is the response from the batch status / cancel endpoints.
+// BatchStatusResponse is the response from the batch status endpoint.
 type BatchStatusResponse struct {
 	BatchID     string               `json:"batchId"`
 	Status      BatchLifecycleStatus `json:"status"`
@@ -480,6 +557,14 @@ type BatchStatusResponse struct {
 	CompletedAt *string              `json:"completedAt,omitempty"`
 }
 
+// BatchCancelResponse is the response from the batch cancel endpoint: the batch
+// state without the per-recipient results.
+type BatchCancelResponse struct {
+	BatchID  string               `json:"batchId"`
+	Status   BatchLifecycleStatus `json:"status"`
+	Progress BatchProgress        `json:"progress"`
+}
+
 // MessageMedia is a message's stored media: the raw bytes plus the served
 // content type. Non-JSON on the wire, like StatusMedia.
 type MessageMedia struct {
@@ -487,12 +572,21 @@ type MessageMedia struct {
 	ContentType string
 }
 
+// PinDurationSeconds is one of the three windows WhatsApp accepts for a pinned message.
+type PinDurationSeconds int
+
+const (
+	PinOneDay     PinDurationSeconds = 86400
+	PinSevenDays  PinDurationSeconds = 604800
+	PinThirtyDays PinDurationSeconds = 2592000
+)
+
 // PinMessageRequest pins a message in its chat. DurationSeconds must be 86400
 // (24h), 604800 (7d) or 2592000 (30d); omit it to take the server default of 24h.
 type PinMessageRequest struct {
-	ChatID          string `json:"chatId"`
-	MessageID       string `json:"messageId"`
-	DurationSeconds int    `json:"durationSeconds,omitempty"`
+	ChatID          string             `json:"chatId"`
+	MessageID       string             `json:"messageId"`
+	DurationSeconds PinDurationSeconds `json:"durationSeconds,omitempty"`
 }
 
 // UnpinMessageRequest removes a message's pin.

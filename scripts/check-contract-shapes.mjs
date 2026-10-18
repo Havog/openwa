@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * Shape gate: the hand-written wire types of the two HTTP clients (the JavaScript SDK's types.ts
- * and the dashboard's api.ts) against the DTO schemas of the committed openapi.json.
+ * Shape gate: the hand-written wire types of all five clients (the JavaScript SDK's types.ts, the
+ * dashboard's api.ts, the Python TypedDicts, the Go structs and the Java records) against the DTO
+ * schemas of the committed openapi.json. Both directions of the traffic are mapped: response
+ * payloads and request bodies alike.
  *
  * This is the contract verification the repo previously had in name only: every existing gate
  * checks WHICH routes/events/methods exist, none checks request/response body SHAPES — the mocks
@@ -14,13 +16,22 @@
  *
  * Known blind spots, so nobody reads a green run as more than it is: TypeScript type-ALIASED
  * enums (e.g. `status: SessionStatus`) resolve to their alias name and are compared by presence
- * and optionality only — the literal sets themselves are ungated on the TS clients; and Java
- * enums (record components typed as enum classes) are likewise presence-only. Python Literals and
- * Go const-block enums DO compare literally.
+ * and optionality only, so the literal sets themselves are ungated on the TS clients. Everywhere
+ * else the vocabulary IS compared member by member: Python Literals, Go const blocks and Java
+ * enum constants (by their `@SerializedName`, or the constant's own name when it has none, which
+ * is what Gson emits; a bare `UNKNOWN` is the decode-only sentinel and is skipped), whether the
+ * field carries one member or a list of them.
+ *
+ * One exception, in Java only: Gson serializes an enum constant by name, i.e. as a JSON string, so
+ * a NUMERIC enum cannot be modelled as a Java enum without a custom adapter: the wire would carry
+ * "86400" for a field the contract types as a number. Those components stay `Integer` and their
+ * literal set is gated on the other four clients instead. Java also cannot express requiredness
+ * through a record, which is why it alone runs with compareOptionality=false.
  *
  * What one comparison covers, per mapped pair: field-name sets in both directions, required vs
  * optional (hand `?` vs the schema's `required` array), and — for fields whose both sides reduce
- * to a simple token (primitive, enum literal set, array of those, null union) — the token itself,
+ * to a simple token (primitive, enum literal set, array of those, null union; on the hand side, any
+ * union too) — the token itself,
  * which is what catches `string` widened to `string | number` or a re-ordered enum growing a
  * member. Complex/nested fields are compared by presence and optionality only; that limit is
  * deliberate (the hand parser stays regular), and the exclusions below record what is known to be
@@ -34,7 +45,7 @@
  * under-describes reality, fix the backend DTO decorator, regenerate, and un-exclude).
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 // Resolve from the script's own location, not process.cwd() — same reason check-sdk-coverage.mjs
@@ -46,27 +57,18 @@ const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const MAPPINGS = {
   'sdk/javascript/src/types.ts': {
     AccountRestriction: 'AccountRestrictionDto',
+    ArchiveChatRequest: 'ArchiveChatDto',
+    BatchCancelResponse: 'BatchCancelResponseDto',
     BatchMessageResult: 'BatchMessageResultDto',
     BatchProgress: 'BatchProgressDto',
     BatchStatusResponse: 'BatchStatusResponseDto',
+    BulkMediaRequest: 'BulkMediaDto',
     BulkMessageContent: 'BulkMessageContentDto',
     BulkMessageItem: 'BulkMessageItemDto',
     BulkMessageResponse: 'BulkMessageResponseDto',
     CallLinkResponse: 'CallLinkResponseDto',
     ChatHistoryMessage: 'ChatHistoryMessageDto',
     ChatSummary: 'ChatSummaryDto',
-    GroupInfo: 'GroupInfoDto',
-    GroupJoinInfo: 'GroupJoinInfoDto',
-    GroupParticipant: 'GroupParticipantDto',
-    GroupSummary: 'GroupSummaryDto',
-    MessageListResponse: 'MessageListResponseDto',
-    MessageRecord: 'MessageListItemDto',
-    MessageResponse: 'MessageResponseDto',
-    // Request-side pairs: every *Request interface with a matching DTO, plus the filter-condition
-    // shape. Two requests have NO named schema (inline objects on their routes) and stay unmapped:
-    // AddLabelRequest (POST /labels/chat/:chatId) and SubscribeChannelRequest (POST /channels/subscribe).
-    ArchiveChatRequest: 'ArchiveChatDto',
-    BulkMediaRequest: 'BulkMediaDto',
     CreateCallLinkRequest: 'CreateCallLinkDto',
     CreateChannelRequest: 'CreateChannelDto',
     CreateGroupRequest: 'CreateGroupDto',
@@ -79,18 +81,33 @@ const MAPPINGS = {
     EditMessageRequest: 'EditMessageDto',
     ForwardMessageRequest: 'ForwardMessageDto',
     GroupDescriptionRequest: 'GroupDescriptionDto',
+    GroupInfo: 'GroupInfoDto',
+    GroupJoinInfo: 'GroupJoinInfoDto',
     GroupMembershipRequest: 'GroupMembershipRequestDto',
+    GroupParticipant: 'GroupParticipantDto',
     GroupSubjectRequest: 'GroupSubjectDto',
+    GroupSummary: 'GroupSummaryDto',
+    HealthReadyResponse: 'ReadinessResponseDto',
     JoinGroupRequest: 'JoinGroupDto',
-    MarkChatRequest: 'MarkChatReadDto',
+    MarkChatReadRequest: 'MarkChatReadDto',
+    MarkChatRequest: 'MarkChatUnreadDto',
+    SubscribePresenceRequest: 'SubscribePresenceDto',
+    MessageListResponse: 'MessageListResponseDto',
+    MessageRecord: 'MessageListItemDto',
+    MessageResponse: 'MessageResponseDto',
     MuteChannelRequest: 'MuteChannelDto',
     MuteChatRequest: 'MuteChatDto',
+    PairingCodeResponse: 'PairingCodeResponseDto',
+    ParticipantPresence: 'ParticipantPresenceDto',
     ParticipantsRequest: 'ParticipantsDto',
     PinChatRequest: 'PinChatDto',
     PinMessageRequest: 'PinMessageDto',
+    ProfilePictureResponse: 'ProfilePictureResponseDto',
+    ProfilePicturesResponse: 'ProfilePicturesResponseDto',
     ReactMessageRequest: 'ReactMessageDto',
     ReplyMessageRequest: 'ReplyMessageDto',
     RequestPairingCodeRequest: 'RequestPairingCodeDto',
+    SearchHit: 'SearchHitDto',
     SendAudioRequest: 'SendAudioMessageDto',
     SendBulkRequest: 'SendBulkMessageDto',
     SendChatStateRequest: 'SendChatStateDto',
@@ -105,31 +122,32 @@ const MAPPINGS = {
     SendTextStatusRequest: 'SendTextStatusDto',
     SendVideoStatusRequest: 'SendVideoStatusDto',
     SendVoiceStatusRequest: 'SendVoiceStatusDto',
+    SessionResponse: 'SessionResponseDto',
+    SessionProxy: 'SessionProxyResponseDto',
     SetGroupPictureRequest: 'SetGroupPictureDto',
     SetOwnPresenceRequest: 'SetOwnPresenceDto',
     SetProfileNameRequest: 'SetProfileNameDto',
     SetProfilePictureRequest: 'SetProfilePictureDto',
     SetProfileStatusRequest: 'SetProfileStatusDto',
     StarMessageRequest: 'StarMessageDto',
+    StatusResult: 'StatusResultDto',
     TransferChannelOwnershipRequest: 'TransferChannelOwnershipDto',
     UnpinMessageRequest: 'UnpinMessageDto',
     UpdateSessionConfigRequest: 'UpdateSessionConfigDto',
+    UpdateSessionProxyRequest: 'UpdateSessionProxyDto',
     UpsertContactRequest: 'UpsertContactDto',
     UpsertLabelRequest: 'UpsertLabelDto',
+    RedriveWebhookDeliveriesRequest: 'RedriveWebhookDeliveriesDto',
     VotePollRequest: 'VotePollDto',
+    WebhookDeliveryFailure: 'WebhookDeliveryFailureDto',
     WebhookFilterCondition: 'WebhookFilterConditionDto',
-    PairingCodeResponse: 'PairingCodeResponseDto',
-    ParticipantPresence: 'ParticipantPresenceDto',
-    ProfilePictureResponse: 'ProfilePictureResponseDto',
-    ProfilePicturesResponse: 'ProfilePicturesResponseDto',
-    SearchHit: 'SearchHitDto',
-    SessionResponse: 'SessionResponseDto',
-    StatusResult: 'StatusResultDto',
+    WebhookRedriveResult: 'WebhookRedriveResultDto',
     WebhookResponse: 'WebhookResponseDto',
   },
   'dashboard/src/services/api.ts': {
     AccountRestriction: 'AccountRestrictionDto',
     AuditLog: 'AuditLogDto',
+    BatchCancelResponse: 'BatchCancelResponseDto',
     BatchMessageResult: 'BatchMessageResultDto',
     BatchProgress: 'BatchProgressDto',
     BatchStatusResponse: 'BatchStatusResponseDto',
@@ -147,62 +165,151 @@ const MAPPINGS = {
     SearchHit: 'SearchHitDto',
     Session: 'SessionResponseDto',
     SessionConfig: 'SessionConfigResponseDto',
+    SessionProxy: 'SessionProxyResponseDto',
     Webhook: 'WebhookResponseDto',
   },
 };
 
 /**
  * Floor on the mapping SIZE per client. The per-file compared-pairs guard above cannot see a
- * rewrite that silently DROPS entries (protection shrinks while everything stays green — observed
- * in review: a from-memory rewrite lost four conforming pairs and the run still passed). Raising
- * these floors as pairs are added makes the shrink loud.
+ * rewrite that silently DROPS entries (protection shrinks while everything stays green: a rewrite
+ * once lost four conforming pairs and the run still passed). Raising these floors as pairs are
+ * added makes the shrink loud.
  */
 const MINIMUM_MAPPED = {
-  'sdk/javascript/src/types.ts': 78,
-  'dashboard/src/services/api.ts': 20,
-  'sdk/python/openwa/types.py': 23,
-  'sdk/go': 25,
-  'sdk/java': 25,
+  'sdk/javascript/src/types.ts': 85,
+  'dashboard/src/services/api.ts': 22,
+  'sdk/python/openwa/types.py': 84,
+  'sdk/go': 81,
+  'sdk/java': 85,
 };
 
 /** Known drift, deliberately not gated yet — each line is a to-adjudicate follow-up. */
 const EXCLUDED = {
+  'sdk/go': {
+    UpdateWebhookRequest:
+      'BY DESIGN, same alias as WebhookResponse below: the events list resolves to array<string> because `WebhookEvent` is an alias for string, so the vocabulary cannot be carried on this client',
+    WebhookResponse:
+      'BY DESIGN: `WebhookEvent` is a type ALIAS for string so the Event* constants drop into a []string literal without a conversion, which means the events list resolves to array<string> and cannot carry the vocabulary. Un-excluding means making it a defined type and retyping the three Events fields, a source break for a published client',
+    CreateWebhookRequest:
+      'BY DESIGN: `events` carries no omitempty, so a nil slice is sent as null, which the server treats like an absent key (default ["message.received"]), and an empty slice is sent as [] and refused with 400 (ArrayMinSize(1)). Adding omitempty would silently turn that empty slice into the default subscription. The harvester reads the missing omitempty as a required field, which the optional DTO field does not match',
+    UpdateSessionConfigRequest:
+      'BY DESIGN: every component is `json:"-"` and MarshalJSON writes the body by hand, because the three fields need an explicit null to reset and Go cannot express "null" and "absent" through one pointer, so the harvester sees no wire fields at all',
+    UpdateSessionProxyRequest:
+      'BY DESIGN, same shape as UpdateSessionConfigRequest above: clearing a proxy needs an explicit null and `omitempty` on a nil pointer omits the key instead, so ProxyURL is `json:"-"` with a ClearProxyURL flag and MarshalJSON writes the body, leaving no wire fields for the harvester to see',
+  },
+  'sdk/java': {
+    UpdateSessionConfigRequest:
+      'BY DESIGN: the three clear* components are client-side control flags consumed by UpdateSessionConfigRequestSerializer, which is what emits the explicit null; they never reach the wire',
+  },
   'dashboard/src/services/api.ts': {
+    Webhook:
+      'the events list models client state as much as the wire: it is rebuilt from checkbox toggles in Webhooks.tsx and re-guarded at runtime in queries.ts/useWebSocket.ts, so narrowing it to the event union would type those call sites rather than the payload. The vocabulary is gated on the JavaScript, Python and Java clients',
     Session:
       'BY DESIGN, not drift: the wire always carries engineLoaded, but this client clears it to "unknown" after a websocket status event so the action helpers fall back to the status set — the type models client state, not the wire',
   },
 };
 
+// UpdateWebhookRequest is mapped on the three clients that declare it as a named type. The
+// JavaScript SDK spells it `Partial<CreateWebhookRequest> & { active?: boolean }`, a type ALIAS
+// rather than an interface, which the hand parser does not read; mapping it there would fail as a
+// missing hand type rather than gate anything.
+
 /** Python client pairs (TypedDict classes in openwa/types.py). */
 const PYTHON_MAPPING = {
   AccountRestriction: 'AccountRestrictionDto',
+  ArchiveChatRequest: 'ArchiveChatDto',
+  BatchCancelResponse: 'BatchCancelResponseDto',
   BatchMessageResult: 'BatchMessageResultDto',
   BatchProgress: 'BatchProgressDto',
   BatchStatusResponse: 'BatchStatusResponseDto',
+  BulkMediaRequest: 'BulkMediaDto',
   BulkMessageContent: 'BulkMessageContentDto',
   BulkMessageItem: 'BulkMessageItemDto',
   BulkMessageResponse: 'BulkMessageResponseDto',
   CallLinkResponse: 'CallLinkResponseDto',
+  ChatHistoryMessage: 'ChatHistoryMessageDto',
   ChatSummary: 'ChatSummaryDto',
+  CreateCallLinkRequest: 'CreateCallLinkDto',
+  CreateChannelRequest: 'CreateChannelDto',
+  CreateGroupRequest: 'CreateGroupDto',
+  CreateSessionRequest: 'CreateSessionDto',
+  CreateTemplateRequest: 'CreateTemplateDto',
+  CreateWebhookRequest: 'CreateWebhookDto',
+  CustomLinkPreview: 'CustomLinkPreviewDto',
+  DeleteChatRequest: 'DeleteChatDto',
+  DeleteMessageRequest: 'DeleteMessageDto',
+  DemoteChannelAdminRequest: 'DemoteChannelAdminDto',
+  EditMessageRequest: 'EditMessageDto',
+  ForwardMessageRequest: 'ForwardMessageDto',
   GroupInfo: 'GroupInfoDto',
   GroupJoinInfo: 'GroupJoinInfoDto',
+  GroupMembershipRequest: 'GroupMembershipRequestDto',
   GroupParticipant: 'GroupParticipantDto',
   GroupSummary: 'GroupSummaryDto',
+  HealthReadyResponse: 'ReadinessResponseDto',
+  JoinGroupRequest: 'JoinGroupDto',
+  MarkChatReadRequest: 'MarkChatReadDto',
+  MarkChatRequest: 'MarkChatUnreadDto',
+  SubscribePresenceRequest: 'SubscribePresenceDto',
   MessageListResponse: 'MessageListResponseDto',
   MessageRecord: 'MessageListItemDto',
   MessageResponse: 'MessageResponseDto',
+  MuteChannelRequest: 'MuteChannelDto',
+  MuteChatRequest: 'MuteChatDto',
   PairingCodeResponse: 'PairingCodeResponseDto',
   ParticipantPresence: 'ParticipantPresenceDto',
+  PinChatRequest: 'PinChatDto',
+  PinMessageRequest: 'PinMessageDto',
   ProfilePictureResponse: 'ProfilePictureResponseDto',
   ProfilePicturesResponse: 'ProfilePicturesResponseDto',
+  ReactMessageRequest: 'ReactMessageDto',
+  ReplyMessageRequest: 'ReplyMessageDto',
+  RequestPairingCodeRequest: 'RequestPairingCodeDto',
+  SendAudioRequest: 'SendAudioMessageDto',
+  SendBulkRequest: 'SendBulkMessageDto',
+  SendChatStateRequest: 'SendChatStateDto',
+  SendContactRequest: 'SendContactDto',
+  SendImageStatusRequest: 'SendImageStatusDto',
+  SendLocationRequest: 'SendLocationDto',
+  SendMediaRequest: 'SendMediaMessageDto',
+  SendPollRequest: 'SendPollDto',
+  SendProductRequest: 'SendProductDto',
+  SendTemplateRequest: 'SendTemplateMessageDto',
+  SendTextRequest: 'SendTextMessageDto',
+  SendTextStatusRequest: 'SendTextStatusDto',
+  SendVideoStatusRequest: 'SendVideoStatusDto',
+  SendVoiceStatusRequest: 'SendVoiceStatusDto',
   SessionResponse: 'SessionResponseDto',
+  SessionProxy: 'SessionProxyResponseDto',
+  SetGroupPictureRequest: 'SetGroupPictureDto',
+  SetOwnPresenceRequest: 'SetOwnPresenceDto',
+  SetProfileNameRequest: 'SetProfileNameDto',
+  SetProfilePictureRequest: 'SetProfilePictureDto',
+  SetProfileStatusRequest: 'SetProfileStatusDto',
+  StarMessageRequest: 'StarMessageDto',
   StatusResult: 'StatusResultDto',
+  TransferChannelOwnershipRequest: 'TransferChannelOwnershipDto',
+  UnpinMessageRequest: 'UnpinMessageDto',
+  UpdateSessionConfigRequest: 'UpdateSessionConfigDto',
+  UpdateSessionProxyRequest: 'UpdateSessionProxyDto',
+  UpdateWebhookRequest: 'UpdateWebhookDto',
+  UpsertContactRequest: 'UpsertContactDto',
+  UpsertLabelRequest: 'UpsertLabelDto',
+  RedriveWebhookDeliveriesRequest: 'RedriveWebhookDeliveriesDto',
+  VotePollRequest: 'VotePollDto',
+  WebhookDeliveryFailure: 'WebhookDeliveryFailureDto',
+  WebhookFilterCondition: 'WebhookFilterConditionDto',
+  WebhookFilters: 'WebhookFiltersDto',
+  WebhookRedriveResult: 'WebhookRedriveResultDto',
   WebhookResponse: 'WebhookResponseDto',
 };
 
 /** Go client pairs (wire structs across types_*.go). */
 const GO_MAPPING = {
   AccountRestriction: 'AccountRestrictionDto',
+  ArchiveChatRequest: 'ArchiveChatDto',
+  BatchCancelResponse: 'BatchCancelResponseDto',
   BatchMessageResult: 'BatchMessageResultDto',
   BatchProgress: 'BatchProgressDto',
   BatchStatusResponse: 'BatchStatusResponseDto',
@@ -212,55 +319,174 @@ const GO_MAPPING = {
   CallLinkResponse: 'CallLinkResponseDto',
   ChatHistoryMessage: 'ChatHistoryMessageDto',
   ChatSummary: 'ChatSummaryDto',
+  CreateCallLinkRequest: 'CreateCallLinkDto',
+  CreateChannelRequest: 'CreateChannelDto',
+  CreateGroupRequest: 'CreateGroupDto',
+  CreateSessionRequest: 'CreateSessionDto',
+  CreateTemplateRequest: 'CreateTemplateDto',
+  CreateWebhookRequest: 'CreateWebhookDto',
+  DeleteChatRequest: 'DeleteChatDto',
+  DeleteMessageRequest: 'DeleteMessageDto',
+  DemoteChannelAdminRequest: 'DemoteChannelAdminDto',
+  EditMessageRequest: 'EditMessageDto',
+  ForwardMessageRequest: 'ForwardMessageDto',
   GroupInfo: 'GroupInfoDto',
   GroupJoinInfo: 'GroupJoinInfoDto',
+  GroupMembershipRequest: 'GroupMembershipRequestDto',
   GroupParticipant: 'GroupParticipantDto',
   GroupSummary: 'GroupSummaryDto',
+  HealthReadyResponse: 'ReadinessResponseDto',
+  JoinGroupRequest: 'JoinGroupDto',
+  MarkChatReadRequest: 'MarkChatReadDto',
+  MarkChatRequest: 'MarkChatUnreadDto',
+  SubscribePresenceRequest: 'SubscribePresenceDto',
   MessageListResponse: 'MessageListResponseDto',
   MessageRecord: 'MessageListItemDto',
   MessageResponse: 'MessageResponseDto',
+  MuteChannelRequest: 'MuteChannelDto',
+  MuteChatRequest: 'MuteChatDto',
   PairingCodeResponse: 'PairingCodeResponseDto',
   ParticipantPresence: 'ParticipantPresenceDto',
+  PinChatRequest: 'PinChatDto',
+  PinMessageRequest: 'PinMessageDto',
   ProfilePictureResponse: 'ProfilePictureResponseDto',
   ProfilePicturesResponse: 'ProfilePicturesResponseDto',
+  ReactMessageRequest: 'ReactMessageDto',
+  ReplyMessageRequest: 'ReplyMessageDto',
+  RequestPairingCodeRequest: 'RequestPairingCodeDto',
   SearchHit: 'SearchHitDto',
+  SendAudioRequest: 'SendAudioMessageDto',
+  SendBulkRequest: 'SendBulkMessageDto',
+  SendChatStateRequest: 'SendChatStateDto',
+  SendContactRequest: 'SendContactDto',
+  SendImageStatusRequest: 'SendImageStatusDto',
+  SendLocationRequest: 'SendLocationDto',
+  SendMediaRequest: 'SendMediaMessageDto',
+  SendPollRequest: 'SendPollDto',
+  SendProductRequest: 'SendProductDto',
+  SendTemplateRequest: 'SendTemplateMessageDto',
+  SendTextRequest: 'SendTextMessageDto',
+  SendTextStatusRequest: 'SendTextStatusDto',
+  SendVideoStatusRequest: 'SendVideoStatusDto',
+  SendVoiceStatusRequest: 'SendVoiceStatusDto',
   SessionResponse: 'SessionResponseDto',
+  SessionProxy: 'SessionProxyResponseDto',
+  SetGroupPictureRequest: 'SetGroupPictureDto',
+  SetOwnPresenceRequest: 'SetOwnPresenceDto',
+  SetProfileNameRequest: 'SetProfileNameDto',
+  SetProfilePictureRequest: 'SetProfilePictureDto',
+  SetProfileStatusRequest: 'SetProfileStatusDto',
+  StarMessageRequest: 'StarMessageDto',
   StatusResult: 'StatusResultDto',
+  TransferChannelOwnershipRequest: 'TransferChannelOwnershipDto',
+  UnpinMessageRequest: 'UnpinMessageDto',
+  UpdateSessionConfigRequest: 'UpdateSessionConfigDto',
+  UpdateSessionProxyRequest: 'UpdateSessionProxyDto',
+  UpdateWebhookRequest: 'UpdateWebhookDto',
+  UpsertContactRequest: 'UpsertContactDto',
+  UpsertLabelRequest: 'UpsertLabelDto',
+  RedriveWebhookDeliveriesRequest: 'RedriveWebhookDeliveriesDto',
+  VotePollRequest: 'VotePollDto',
+  WebhookDeliveryFailure: 'WebhookDeliveryFailureDto',
+  WebhookRedriveResult: 'WebhookRedriveResultDto',
   WebhookResponse: 'WebhookResponseDto',
 };
 
 /** Java client pairs (record components in model/*.java). */
 const JAVA_MAPPING = {
   AccountRestriction: 'AccountRestrictionDto',
+  ArchiveChatRequest: 'ArchiveChatDto',
+  BatchCancelResponse: 'BatchCancelResponseDto',
   BatchMessageResult: 'BatchMessageResultDto',
   BatchProgress: 'BatchProgressDto',
   BatchStatusResponse: 'BatchStatusResponseDto',
+  BulkMediaRequest: 'BulkMediaDto',
   BulkMessageContent: 'BulkMessageContentDto',
   BulkMessageItem: 'BulkMessageItemDto',
   BulkMessageResponse: 'BulkMessageResponseDto',
   CallLinkResponse: 'CallLinkResponseDto',
   ChatHistoryMessage: 'ChatHistoryMessageDto',
   ChatSummary: 'ChatSummaryDto',
+  CreateCallLinkRequest: 'CreateCallLinkDto',
+  CreateChannelRequest: 'CreateChannelDto',
+  CreateGroupRequest: 'CreateGroupDto',
+  CreateSessionRequest: 'CreateSessionDto',
+  CreateTemplateRequest: 'CreateTemplateDto',
+  CreateWebhookRequest: 'CreateWebhookDto',
+  DeleteChatRequest: 'DeleteChatDto',
+  DeleteMessageRequest: 'DeleteMessageDto',
+  DemoteChannelAdminRequest: 'DemoteChannelAdminDto',
+  EditMessageRequest: 'EditMessageDto',
+  ForwardMessageRequest: 'ForwardMessageDto',
+  GroupDescriptionRequest: 'GroupDescriptionDto',
   GroupInfo: 'GroupInfoDto',
   GroupJoinInfo: 'GroupJoinInfoDto',
+  GroupMembershipRequest: 'GroupMembershipRequestDto',
   GroupParticipant: 'GroupParticipantDto',
+  GroupSubjectRequest: 'GroupSubjectDto',
   GroupSummary: 'GroupSummaryDto',
+  HealthReadyResponse: 'ReadinessResponseDto',
+  JoinGroupRequest: 'JoinGroupDto',
+  MarkChatReadRequest: 'MarkChatReadDto',
+  MarkChatRequest: 'MarkChatUnreadDto',
+  SubscribePresenceRequest: 'SubscribePresenceDto',
   MessageListResponse: 'MessageListResponseDto',
   MessageRecord: 'MessageListItemDto',
   MessageResponse: 'MessageResponseDto',
+  MuteChannelRequest: 'MuteChannelDto',
+  MuteChatRequest: 'MuteChatDto',
   PairingCodeResponse: 'PairingCodeResponseDto',
   ParticipantPresence: 'ParticipantPresenceDto',
+  ParticipantsRequest: 'ParticipantsDto',
+  PinChatRequest: 'PinChatDto',
+  PinMessageRequest: 'PinMessageDto',
   ProfilePictureResponse: 'ProfilePictureResponseDto',
   ProfilePicturesResponse: 'ProfilePicturesResponseDto',
+  ReactMessageRequest: 'ReactMessageDto',
+  ReplyMessageRequest: 'ReplyMessageDto',
+  RequestPairingCodeRequest: 'RequestPairingCodeDto',
   SearchHit: 'SearchHitDto',
+  SendAudioRequest: 'SendAudioMessageDto',
+  SendBulkRequest: 'SendBulkMessageDto',
+  SendChatStateRequest: 'SendChatStateDto',
+  SendContactRequest: 'SendContactDto',
+  SendImageStatusRequest: 'SendImageStatusDto',
+  SendLocationRequest: 'SendLocationDto',
+  SendMediaRequest: 'SendMediaMessageDto',
+  SendPollRequest: 'SendPollDto',
+  SendProductRequest: 'SendProductDto',
+  SendTemplateRequest: 'SendTemplateMessageDto',
+  SendTextRequest: 'SendTextMessageDto',
+  SendTextStatusRequest: 'SendTextStatusDto',
+  SendVideoStatusRequest: 'SendVideoStatusDto',
+  SendVoiceStatusRequest: 'SendVoiceStatusDto',
   SessionResponse: 'SessionResponseDto',
+  SessionProxy: 'SessionProxyResponseDto',
+  SetGroupPictureRequest: 'SetGroupPictureDto',
+  SetOwnPresenceRequest: 'SetOwnPresenceDto',
+  SetProfileNameRequest: 'SetProfileNameDto',
+  SetProfilePictureRequest: 'SetProfilePictureDto',
+  SetProfileStatusRequest: 'SetProfileStatusDto',
+  StarMessageRequest: 'StarMessageDto',
   StatusResult: 'StatusResultDto',
+  TransferChannelOwnershipRequest: 'TransferChannelOwnershipDto',
+  UnpinMessageRequest: 'UnpinMessageDto',
+  UpdateSessionConfigRequest: 'UpdateSessionConfigDto',
+  UpdateSessionProxyRequest: 'UpdateSessionProxyDto',
+  UpdateWebhookRequest: 'UpdateWebhookDto',
+  UpsertContactRequest: 'UpsertContactDto',
+  UpsertLabelRequest: 'UpsertLabelDto',
+  RedriveWebhookDeliveriesRequest: 'RedriveWebhookDeliveriesDto',
+  VotePollRequest: 'VotePollDto',
+  WebhookDeliveryFailure: 'WebhookDeliveryFailureDto',
+  WebhookRedriveResult: 'WebhookRedriveResultDto',
   WebhookResponse: 'WebhookResponseDto',
 };
 
 // ── hand-type parsing (declarations follow the regular formatting of the two files) ──
 
 export function parseHandTypes(source) {
+  source = source.replace(/\r\n/g, '\n');
   const types = {};
   const parents = {};
   const iface = /export interface (\w+)(?: extends (\w+))? \{([\s\S]*?)\n\}/g;
@@ -434,9 +660,12 @@ export function parseObjectToken(token) {
   return members;
 }
 
-/** Fields whose both sides reduce to a primitive/enum/array/null-union get token-level diffing. */
+/** Fields whose both sides reduce to a primitive/enum/array/null-union get token-level diffing.
+ *  `array<enum(...)>` counts: an array of enum members is exactly as comparable as a bare one, and
+ *  leaving it out silently ungated every vocabulary that travels as a list, the webhook event set
+ *  above all, on every client at once. */
 function isSimpleToken(token) {
-  return /^(string|number|boolean|unknown|any)(\|null)?$|^enum\([^)]*\)$|^array<(string|number|boolean)(\|null)?>$/.test(
+  return /^(string|number|boolean|unknown|any)(\|null)?$|^enum\([^)]*\)$|^array<((string|number|boolean)(\|null)?|enum\([^)]*\))>$/.test(
     token,
   );
 }
@@ -470,9 +699,18 @@ export function comparePair(handName, handMembers, schemaName, schema, schemas, 
         // BOTH sides so nullability does not read as drift there; enums and kinds still compare.
         hand = hand.replace(/\|null$/, '');
         contract = contract.replace(/\|null$/, '');
+        // Gson serializes an enum constant by its name, i.e. as a JSON string, so a NUMERIC enum
+        // cannot be modelled as a Java enum without a custom adapter: the wire would carry
+        // "86400" for a field the contract types as a number. Those components stay `Integer`
+        // here; the literal set is gated on every other client. String enums ARE modelled as Java
+        // enums and keep comparing by presence.
+        if (/^enum\(-?\d+(?:\.\d+)?(?:,-?\d+(?:\.\d+)?)*\)$/.test(contract) && hand === 'number') {
+          hand = contract;
+        }
       }
       const absorbs = handInfo.absorbsNull && contract === `${hand}|null`;
-      if (hand !== contract && !absorbs && isSimpleToken(hand)) {
+      // A union never equals a simple contract token, so it is drift, not a shape too complex to read.
+      if (hand !== contract && !absorbs && (isSimpleToken(hand) || hand.startsWith('union('))) {
         diffs.push(`"${field}": hand ${hand}, contract ${contract}`);
       }
     }
@@ -491,6 +729,7 @@ export function comparePair(handName, handMembers, schemaName, schema, schemas, 
  * TypedDict inheritance (the parent's own total flag governs its members).
  */
 export function parsePythonTypes(source) {
+  source = source.replace(/\r\n/g, '\n');
   // Join continuation lines inside unclosed brackets so multi-line Literal[...] aliases and
   // annotations parse as one token (a truncated `Literal[` is worse than no token).
   const joined = [];
@@ -647,8 +886,13 @@ function pythonToken(text, resolve, depth = 0) {
     if (t === 'Any') return 'any';
     const lit = t.match(/^Literal\[(.+)\]$/s);
     if (lit) {
-      const vals = [...lit[1].matchAll(/["']([^"']+)["']/g)].map(m => m[1]);
-      if (vals.length) return `enum(${vals.slice().sort().join(',')})`;
+      // Quoted members are string enums; bare members are the numeric ones (a status font, a pin
+      // window). Both must reduce to the same enum token the schema side emits. A Literal whose
+      // members went unread fell through to a non-simple token, which comparePair then skips, so
+      // the field silently stopped being gated.
+      const quoted = [...lit[1].matchAll(/["']([^"']+)["']/g)].map(m => m[1]);
+      const vals = quoted.length ? quoted : [...lit[1].matchAll(/-?\d+(?:\.\d+)?/g)].map(m => m[0]);
+      if (vals.length) return `enum(${sortEnumMembers(vals).join(',')})`;
     }
     const lst = t.match(/^(?:List|list)\[(.+)\]$/s);
     if (lst) return `array<${pythonToken(lst[1], resolve, depth + 1)}>`;
@@ -673,6 +917,7 @@ function pythonToken(text, resolve, depth = 0) {
  * grouped per defined type produce enum tokens.
  */
 export function parseGoTypes(sources) {
+  sources = sources.map(s => s.replace(/\r\n/g, '\n'));
   const structs = {};
   const scalarAliases = {};
   const constGroups = {};
@@ -703,15 +948,18 @@ export function parseGoTypes(sources) {
     for (const cblock of source.matchAll(/const \(([\s\S]*?)\n\)/g)) {
       for (const line of cblock[1].split('\n')) {
         // gofmt pads name/type with multiple spaces — \s+ on both sides of the type.
-        const m = line.match(/^\s*\w+\s+(\w+)\s+=\s+["']([^"']+)["']/);
-        if (m) (constGroups[m[1]] ??= []).push(m[2]);
+        // A quoted value is a string enum, a bare one the numeric kind (pin windows, status
+        // fonts). Reading only the quoted form left every numeric Go enum resolving to plain
+        // `number`, which reports as drift against an enum schema and cannot be satisfied.
+        const m = line.match(/^\s*\w+\s+(\w+)\s+=\s+(?:["']([^"']+)["']|(-?\d+(?:\.\d+)?))\s*(?:\/\/.*)?$/);
+        if (m) (constGroups[m[1]] ??= []).push(m[2] ?? m[3]);
       }
     }
   }
 
   // defined scalar types whose consts exist become enums
   for (const [tname, vals] of Object.entries(constGroups)) {
-    if (scalarAliases[tname]) scalarAliases[tname] = `enum(${[...new Set(vals)].sort().join(',')})`;
+    if (scalarAliases[tname]) scalarAliases[tname] = `enum(${sortEnumMembers([...new Set(vals)]).join(',')})`;
   }
 
   const expand = (typeText, depth = 0) => {
@@ -748,6 +996,7 @@ export function parseGoTypes(sources) {
  * (the client config sets compareOptionality=false).
  */
 export function parseJavaTypes(sources) {
+  sources = sources.map(s => s.replace(/\r\n/g, '\n'));
   const records = {};
   const primMap = {
     String: 'string',
@@ -758,6 +1007,12 @@ export function parseJavaTypes(sources) {
     boolean: 'boolean',
     Integer: 'number',
     Long: 'number',
+    // The boxed numerics as a family: a component typed `Double` resolved to the bare class name,
+    // which is not a simple token, so its type went uncompared while the field counted as present.
+    Double: 'number',
+    Float: 'number',
+    Short: 'number',
+    Byte: 'number',
     Boolean: 'boolean',
     JsonObject: 'any',
     Object: 'any',
@@ -765,12 +1020,56 @@ export function parseJavaTypes(sources) {
     Instant: 'string',
     LocalDate: 'string',
   };
+  const enums = {};
+  for (const raw of sources) {
+    const source = raw.replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const m of source.matchAll(/public enum (\w+)\s*\{([\s\S]*?)\n\}/g)) {
+      // Constants end at the first `;` (anything after it is methods/fields). Gson emits the
+      // @SerializedName value when present and the constant's own name otherwise, so that is the
+      // wire member. Without this the whole enum resolved to its Java type name, which is not a
+      // simple token, so comparePair skipped the field and a wrong wire value went unnoticed.
+      const members = [];
+      for (const part of m[2].split(';')[0].split(',')) {
+        const serialized = part.match(/@SerializedName\("([^"]+)"\)/);
+        if (serialized) {
+          members.push(serialized[1]);
+          continue;
+        }
+        const bare = part
+          .replace(/@\w+\([^)]*\)/g, '')
+          .trim()
+          .match(/^([A-Z][A-Z0-9_]*)$/);
+        // A bare UNKNOWN is the client-side sentinel the SDK decodes an unrecognised token to, not
+        // a wire member. An annotated @SerializedName("unknown") is a real member and counts above.
+        if (bare && bare[1] !== 'UNKNOWN') members.push(bare[1]);
+      }
+      if (members.length) enums[m[1]] = `enum(${sortEnumMembers([...new Set(members)]).join(',')})`;
+    }
+  }
   for (const raw of sources) {
     // Javadoc BETWEEN record components breaks comma-splitting — strip comments first.
     const source = raw.replace(/\/\*[\s\S]*?\*\//g, '');
     for (const m of source.matchAll(/record (\w+)\(([^)]*)\)/g)) {
       const members = {};
-      for (const comp of m[2].split(',')) {
+      // Split at TOP-LEVEL commas only. A plain split(',') tears `Map<String, Object> config` into
+      // two halves: the first is unparseable and dropped, the second parses as type `Object>` with
+      // the right field NAME, so the member survived with a token nothing could compare and the
+      // pair passed on names alone.
+      const components = [];
+      let buffer = '';
+      let angle = 0;
+      for (const ch of m[2]) {
+        if (ch === '<') angle++;
+        else if (ch === '>') angle--;
+        if (ch === ',' && angle === 0) {
+          components.push(buffer);
+          buffer = '';
+          continue;
+        }
+        buffer += ch;
+      }
+      if (buffer.trim()) components.push(buffer);
+      for (const comp of components) {
         const cm = comp.trim().match(/^(?:final\s+)?([\w<>,.\[\]\s]+?)\s+(\w+)$/);
         if (!cm) continue;
         members[cm[2]] = { optional: true, token: cm[1].trim(), __java: cm[1].trim() };
@@ -778,13 +1077,20 @@ export function parseJavaTypes(sources) {
       records[m[1]] = members;
     }
   }
-  const expand = (t, depth = 0) => {
+  const expand = (rawType, depth = 0) => {
     if (depth >= 4) return 'object';
+    // Strip a package qualifier first: `java.util.List<String>` is the same shape as `List<String>`,
+    // and records here use both spellings. Matching only the unqualified one left the qualified
+    // components resolving to their raw text, which is not a simple token, so comparePair skipped
+    // them, and `mentions` is carried by two request records with its type uncompared.
+    const t = rawType.replace(/^(?:\w+\.)+(?=[A-Z])/, '');
     const lst = t.match(/^List<(.+)>$/);
     if (lst) return `array<${expand(lst[1], depth + 1)}>`;
     if (/^Map</.test(t)) return 'dict';
     if (primMap[t]) return primMap[t];
+    if (enums[t]) return enums[t];
     const short = t.split('.').pop();
+    if (enums[short]) return enums[short];
     if (records[short]) {
       const parts = Object.entries(records[short]).map(([f, v]) => `${f}:${expand(v.__java, depth + 1)}`);
       return `object(${parts.sort().join(',')})`;
@@ -799,7 +1105,11 @@ export function parseJavaTypes(sources) {
 
 // ── CLI driver ──
 
-const isDirectRun = process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop());
+// Resolved-path comparison, not a basename match: splitting on `/` finds no separator in a Windows
+// path so the whole native path became the "basename" and never matched, and a bare `endsWith` on a
+// basename would also fire for any other script sharing this file's name. argv[1] is realpathed
+// because Node realpaths the main module's URL, so an unresolved path through a symlink never matched.
+const isDirectRun = Boolean(process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url));
 if (isDirectRun) {
   const openapi = JSON.parse(readFileSync(`${REPO_ROOT}openapi.json`, 'utf8'));
   const schemas = openapi.components.schemas;

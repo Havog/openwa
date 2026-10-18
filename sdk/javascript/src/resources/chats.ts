@@ -17,6 +17,8 @@ import type {
   ChatSummary,
   DeleteChatRequest,
   MarkChatRequest,
+  MarkChatReadRequest,
+  SubscribePresenceRequest,
   ChatPresence,
   SendChatStateRequest,
   SuccessResult,
@@ -47,7 +49,7 @@ export class ChatsResource {
    * reconnect, so re-issue it when the session comes back. Subscribe per chat: WhatsApp emits an
    * update on every transition, so a broad subscription is a firehose. whatsapp-web.js answers 501.
    */
-  subscribePresence(sessionId: string, body: MarkChatRequest): Promise<SuccessResult> {
+  subscribePresence(sessionId: string, body: SubscribePresenceRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/presence/subscribe`,
@@ -67,7 +69,7 @@ export class ChatsResource {
   }
 
   /** Mark a chat as read/seen. */
-  markRead(sessionId: string, body: MarkChatRequest): Promise<SuccessResult> {
+  markRead(sessionId: string, body: MarkChatReadRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
       method: 'POST',
       path: `/api/sessions/${encodeSegment(sessionId)}/chats/read`,
@@ -125,7 +127,9 @@ export class ChatsResource {
 
   /**
    * Delete every message in a chat, keeping the chat itself. `success: false` means the engine
-   * declined — an unknown chat, or on Baileys a chat with no known history.
+   * declined — an unknown chat, or on Baileys a chat with no known history. On success the gateway
+   * also deletes its stored copy of the chat's messages (rows, inline and archived media, search
+   * entries); export the history first if you need it.
    */
   clearMessages(sessionId: string, chatId: string): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
@@ -134,7 +138,11 @@ export class ChatsResource {
     });
   }
 
-  /** Delete a chat from the chat list. */
+  /**
+   * Delete a chat from the chat list. On success the gateway also deletes its stored copy of the
+   * chat's messages (rows, inline and archived media, search entries); export the history first if
+   * you need it.
+   */
   delete(sessionId: string, body: DeleteChatRequest): Promise<SuccessResult> {
     return this.client.request<SuccessResult>({
       method: 'POST',

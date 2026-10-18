@@ -10,6 +10,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   comparePair,
   handToken,
@@ -23,7 +28,7 @@ import {
 
 const handSource = `
 export interface Sample {
-  id: string;
+  id: string; // inline comment on field
   name?: string;
   direction: string;
   count: number | null;
@@ -35,6 +40,15 @@ test('parseHandTypes reads required and optional members (a required field is no
   assert.deepEqual(Object.keys(types.Sample), ['id', 'name', 'direction', 'count']);
   assert.equal(types.Sample.id.optional, false);
   assert.equal(types.Sample.name.optional, true);
+});
+
+test('parsers handle Windows CRLF line endings identically to LF', () => {
+  const crlfHand = handSource.replace(/\n/g, '\r\n');
+  assert.deepEqual(parseHandTypes(crlfHand), parseHandTypes(handSource));
+
+  const pySource = 'class Sample(TypedDict):\n    id: str\n    name: NotRequired[str]\n';
+  const crlfPy = pySource.replace(/\n/g, '\r\n');
+  assert.deepEqual(parsePythonTypes(crlfPy), parsePythonTypes(pySource));
 });
 
 const schemas = {
@@ -97,6 +111,19 @@ test('comparePair flags a widened union and an enum mismatch at token level', ()
   const diffs = comparePair('Sample', hand, 'SampleDto', schemas.SampleDto, schemas);
   assert.ok(diffs.some(d => d.includes('"direction": hand string, contract enum(incoming,outgoing)')));
   assert.ok(diffs.some(d => d.includes('"count": hand number|null, contract number')));
+});
+
+test('comparePair flags a primitive widened to a union of primitives', () => {
+  // A two-member union reduces to union(...), which is not a simple token; dropping the diff on that
+  // ground let `string | number` (or Python's `str | int`) stand in for a plain `string` unseen.
+  const hand = {
+    id: { optional: false, token: 'string | number' },
+    direction: { optional: false, token: "'incoming' | 'outgoing'" },
+    count: { optional: false, token: 'str | int' },
+  };
+  const diffs = comparePair('Sample', hand, 'SampleDto', schemas.SampleDto, schemas);
+  assert.ok(diffs.some(d => d.includes('"id": hand union(number,string), contract string')));
+  assert.ok(diffs.some(d => d.includes('"count": hand union(int,str), contract number')));
 });
 
 test('parseObjectToken splits nested object tokens without losing members', () => {
@@ -190,4 +217,131 @@ test('parseJavaTypes: javadoc between components must not drop fields', () => {
   const types = parseJavaTypes([src]);
   assert.deepEqual(Object.keys(types.Sample), ['id', 'count']);
   assert.equal(types.Sample.count.token, 'number');
+});
+
+test('parsePythonTypes: a Literal of bare numbers is an enum, not an unreadable token', () => {
+  const src = [
+    'StatusFont = Literal[0, 1, 2, 6, 10]',
+    '',
+    'class Post(TypedDict, total=False):',
+    '    font: StatusFont',
+  ].join('\n');
+  // Members went unread before, so the field fell through to a non-simple token and comparePair
+  // skipped it: the enum silently stopped being gated while the run stayed green.
+  assert.equal(parsePythonTypes(src).Post.font.token, 'enum(0,1,2,6,10)', 'sorted numerically, not 0,1,10,2,6');
+});
+
+test('parseGoTypes: a const block of bare numbers is an enum', () => {
+  const src = [
+    'type Window int',
+    '',
+    'const (',
+    '\tWindowDay   Window = 86400',
+    '\tWindowWeek  Window = 604800',
+    '\tWindowMonth Window = 2592000 // thirty days',
+    ')',
+    '',
+    'type Sample struct {',
+    '\tWindow Window `json:"window"`',
+    '}',
+  ].join('\n');
+  assert.equal(parseGoTypes([src]).Sample.window.token, 'enum(86400,604800,2592000)');
+});
+
+test('parseJavaTypes: enum constants resolve to their wire values, annotated or bare', () => {
+  const src = [
+    'public enum Scheme {',
+    '    @SerializedName("socks5")',
+    '    SOCKS5,',
+    '    @SerializedName("http")',
+    '    HTTP',
+    '}',
+    'public enum Plain {',
+    '    RED,',
+    '    BLUE',
+    '}',
+    'public record Sample(Scheme scheme, List<Plain> shades) {}',
+  ].join('\n');
+  const s = parseJavaTypes([src]).Sample;
+  // Gson emits @SerializedName when present and the constant name otherwise; without this the
+  // component resolved to the Java type name, which comparePair skips as non-simple.
+  assert.equal(s.scheme.token, 'enum(http,socks5)');
+  assert.equal(s.shades.token, 'array<enum(BLUE,RED)>');
+});
+
+test('parseJavaTypes: a bare UNKNOWN sentinel is not a wire member, an annotated "unknown" is', () => {
+  const src = [
+    'public enum Status {',
+    '    @SerializedName("ready") READY,',
+    '    /** Decoded when the gateway sends a newer value. */',
+    '    UNKNOWN',
+    '}',
+    'public enum Kind {',
+    '    @SerializedName("chat") CHAT,',
+    '    @SerializedName("unknown") UNKNOWN',
+    '}',
+    'public record Sample(Status status, Kind kind) {}',
+  ].join('\n');
+  const s = parseJavaTypes([src]).Sample;
+  assert.equal(s.status.token, 'enum(ready)');
+  assert.equal(s.kind.token, 'enum(chat,unknown)');
+});
+
+test('isSimpleToken-gated diffing reaches inside an array of enum members', () => {
+  const hand = { events: { optional: false, token: 'array<enum(a,b)>' } };
+  const schema = {
+    type: 'object',
+    required: ['events'],
+    properties: { events: { type: 'array', items: { enum: ['a', 'c'] } } },
+  };
+  const diffs = comparePair('Hand', hand, 'Dto', schema, {});
+  assert.equal(diffs.length, 1, 'a vocabulary that travels as a list must still be compared');
+  assert.match(diffs[0], /events/);
+});
+
+test('parseJavaTypes: a package-qualified generic is the same shape as the bare one', () => {
+  // Two request records spell the mentions list `java.util.List<String>`; matching only `List<...>`
+  // left it resolving to its raw text, so its type went uncompared while the field still counted
+  // as present.
+  const src = 'public record Sample(java.util.List<String> mentions, List<String> tags) {}';
+  const s = parseJavaTypes([src]).Sample;
+  assert.equal(s.mentions.token, 'array<string>');
+  assert.equal(s.tags.token, s.mentions.token);
+});
+
+test('parseJavaTypes: a generic carrying a comma is one component, not two', () => {
+  // A plain split(',') tore `Map<String, Object> config` in half: the first piece was unparseable
+  // and dropped, the second parsed as type `Object>` under the right field name, so the member
+  // survived carrying a token nothing could compare.
+  const src = 'public record Sample(String name, Map<String, Object> config, String tail) {}';
+  const s = parseJavaTypes([src]).Sample;
+  assert.deepEqual(Object.keys(s), ['name', 'config', 'tail']);
+  assert.equal(s.config.token, 'dict');
+});
+
+test('parseJavaTypes: boxed numerics reduce to number rather than their class name', () => {
+  // `Double` fell through to the bare class name, which is not a simple token, so comparePair
+  // skipped the field: a Double component against a string contract reported nothing.
+  const s = parseJavaTypes(['public record Sample(Double a, Float b, Short c, Byte d) {}']).Sample;
+  assert.deepEqual(
+    Object.values(s).map(v => v.token),
+    ['number', 'number', 'number', 'number'],
+  );
+  const schema = { type: 'object', required: ['a'], properties: { a: { type: 'string' } } };
+  assert.equal(comparePair('Sample', { a: s.a }, 'Dto', schema, {}, false).length, 1);
+});
+
+test('a run through a symlinked path still reports', () => {
+  // Node realpaths the main module's URL but not argv[1], so a guard comparing the unresolved path
+  // skipped every check and exited 0 whenever the invocation crossed a symlink (/tmp on macOS).
+  const dir = mkdtempSync(join(tmpdir(), 'contract-shapes-'));
+  try {
+    symlinkSync(fileURLToPath(new URL('..', import.meta.url)), join(dir, 'repo'));
+    const run = spawnSync(process.execPath, [join(dir, 'repo', 'scripts', 'check-contract-shapes.mjs')], {
+      encoding: 'utf8',
+    });
+    assert.match(run.stdout + run.stderr, /pairs compared/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
