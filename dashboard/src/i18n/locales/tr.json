@@ -202,6 +202,9 @@
       "read": "Okundu",
       "failed": "Başarısız"
     },
+    "today": "Bugün",
+    "switchSession": "Oturum değiştir",
+    "searchMessages": "Mesajlarda ara",
     "clearSearch": "Aramayı temizle",
     "filters": {
       "label": "Sohbetleri filtrele",
@@ -212,11 +215,13 @@
       "unknown": "Bilinmeyen"
     },
     "noFilterResults": "Bu filtreyle eşleşen sohbet yok",
+    "contactInfo": "Kişi bilgisi",
     "moreActions": "Diğer işlemler",
     "copyChatId": "Sohbet kimliğini kopyala",
     "chatIdCopied": "Sohbet kimliği kopyalandı",
     "copyFailed": "Panoya kopyalanamadı",
     "closeChat": "Sohbeti kapat",
+    "phone": "Telefon numarası",
     "chatId": "Sohbet kimliği",
     "newChat": {
       "title": "Yeni sohbet",
@@ -241,6 +246,12 @@
       "created": "\"{{name}}\" grubu oluşturuldu",
       "createFailed": "Grup oluşturulamadı",
       "removeParticipant": "{{name}} kaldır"
+    },
+    "sessionPicker": {
+      "searchPlaceholder": "Oturum ara...",
+      "noMatch": "Eşleşen oturum yok",
+      "addTitle": "Başka bir numara bağla",
+      "addHint": "Bir oturum oluşturun ve QR koduyla bağlayın"
     },
     "group": {
       "info": "Grup bilgisi",
